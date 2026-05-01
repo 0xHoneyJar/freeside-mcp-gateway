@@ -27,6 +27,65 @@ const app = new Hono();
 const GATEWAY_ORIGIN =
   process.env.GATEWAY_ORIGIN ?? "https://mcp.0xhoneyjar.xyz";
 
+// ────── tenant health probing ──────
+
+type HealthStatus = "up" | "down" | "unknown";
+
+type HealthSnapshot = {
+  status: HealthStatus;
+  latencyMs?: number;
+  checkedAt: number;
+  error?: string;
+};
+
+const HEALTH_CACHE: Map<string, HealthSnapshot> = new Map();
+const PROBE_INTERVAL_MS = 30_000;
+const PROBE_TIMEOUT_MS = 4_000;
+
+async function probeTenant(t: Tenant): Promise<HealthSnapshot> {
+  const start = Date.now();
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+    const res = await fetch(`${t.upstream}/healthz`, {
+      method: "GET",
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    return {
+      status: res.ok ? "up" : "down",
+      latencyMs: Date.now() - start,
+      checkedAt: Date.now(),
+      error: res.ok ? undefined : `HTTP ${res.status}`,
+    };
+  } catch (err) {
+    return {
+      status: "down",
+      checkedAt: Date.now(),
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function probeAll(): Promise<void> {
+  await Promise.all(
+    TENANTS.map(async (t) => {
+      const snap = await probeTenant(t);
+      HEALTH_CACHE.set(t.slug, snap);
+    }),
+  );
+}
+
+// fire and forget on module load + periodic
+void probeAll();
+setInterval(() => {
+  void probeAll();
+}, PROBE_INTERVAL_MS);
+
+function snapshotFor(slug: string): HealthSnapshot {
+  return HEALTH_CACHE.get(slug) ?? { status: "unknown", checkedAt: 0 };
+}
+
 /** Federation manifest schema (custom v0.1 — propose extension when partners adopt). */
 type FederationManifest = {
   schemaVersion: "0.1";
@@ -76,6 +135,21 @@ function buildManifest(): FederationManifest {
 app.get("/healthz", (c) => c.text("ok"));
 
 app.get("/.well-known/federation.json", (c) => c.json(buildManifest()));
+
+app.get("/status.json", (c) =>
+  c.json({
+    gateway: { status: "up", origin: GATEWAY_ORIGIN, checkedAt: new Date().toISOString() },
+    tenants: TENANTS.map((t) => ({
+      slug: t.slug,
+      name: t.name,
+      ...snapshotFor(t.slug),
+      checkedAtIso: HEALTH_CACHE.get(t.slug)?.checkedAt
+        ? new Date(HEALTH_CACHE.get(t.slug)!.checkedAt).toISOString()
+        : null,
+      upstream: t.upstream,
+    })),
+  }),
+);
 
 app.get("/", (c) => c.html(renderIndex()));
 
@@ -223,31 +297,46 @@ app.all("/:slug/*", async (c) => {
 // ────── HTML index ──────
 
 function renderIndex(): string {
-  const rows = TENANTS.map(
-    (t) => `
+  const rows = TENANTS.map((t) => {
+    const snap = snapshotFor(t.slug);
+    const dotClass = `dot dot--${snap.status}`;
+    const ageS = snap.checkedAt ? Math.max(0, Math.round((Date.now() - snap.checkedAt) / 1000)) : null;
+    const ageLabel = ageS === null ? "—" : ageS < 60 ? `${ageS}s ago` : `${Math.round(ageS / 60)}m ago`;
+    const latencyLabel = snap.latencyMs ? `${snap.latencyMs}ms` : "—";
+    return `
       <tr>
-        <td><code>${t.slug}</code></td>
+        <td>
+          <span class="${dotClass}" title="${snap.status}${snap.error ? ` · ${escapeHtml(snap.error)}` : ""}"></span>
+          <code>${t.slug}</code>
+        </td>
         <td>${escapeHtml(t.name)}</td>
-        <td>${escapeHtml(t.description)}</td>
-        <td><code>/${t.slug}/mcp</code></td>
-        <td>${t.status}</td>
-      </tr>`,
-  ).join("");
+        <td class="desc">${escapeHtml(t.description)}</td>
+        <td><a href="/${t.slug}/mcp" class="endpoint">/${t.slug}/mcp</a></td>
+        <td class="meta">${latencyLabel}<br><span class="age">${ageLabel}</span></td>
+      </tr>`;
+  }).join("");
 
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Freeside MCP Federation</title>
-  <meta name="description" content="Federation gateway for MCP services. One domain, many tenants." />
+  <title>Freeside MCP — federation gateway</title>
+  <meta name="description" content="Federation gateway for MCP services. One domain, many tenants. Live status." />
+  <meta http-equiv="refresh" content="30" />
   <style>
     :root {
-      --bg: oklch(0.838 0.026 75.2);
-      --panel: oklch(0.788 0.026 75.2);
-      --ink: oklch(0.203 0.01 67.2);
-      --ink-muted: oklch(0.456 0.008 67.6);
-      --rule: color-mix(in oklch, var(--ink) 20%, transparent);
+      --bg:        oklch(0.838 0.026 75.2);
+      --panel:     oklch(0.788 0.026 75.2);
+      --ink:       oklch(0.203 0.01  67.2);
+      --ink-2:     oklch(0.336 0.009 67.5);
+      --ink-mut:   oklch(0.456 0.008 67.6);
+      --rule:      color-mix(in oklch, var(--ink) 20%, transparent);
+      --rule-soft: color-mix(in oklch, var(--ink) 10%, transparent);
+      --up:        oklch(0.62  0.16  142);
+      --down:      oklch(0.55  0.20  27);
+      --unknown:   oklch(0.65  0.05  85);
     }
+    * { box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
       background: var(--bg);
@@ -256,37 +345,105 @@ function renderIndex(): string {
       padding: 3rem 2rem;
       line-height: 1.6;
     }
-    .container { max-width: 60rem; margin: 0 auto; }
-    h1 { font-family: Georgia, "Iowan Old Style", serif; font-weight: 400; letter-spacing: -0.01em; margin: 0 0 0.5rem; }
-    .lead { color: var(--ink-muted); margin: 0 0 2rem; }
-    code {
+    .container { max-width: 64rem; margin: 0 auto; }
+    h1 {
+      font-family: Georgia, "Iowan Old Style", "Palatino", serif;
+      font-weight: 400;
+      font-size: 2.2rem;
+      letter-spacing: -0.015em;
+      margin: 0 0 0.4rem;
+    }
+    .lead { color: var(--ink-mut); margin: 0 0 1.75rem; max-width: 48rem; }
+    code, .endpoint {
       font-family: ui-monospace, "SF Mono", Menlo, monospace;
       font-size: 0.9em;
+    }
+    code {
       background: var(--panel);
-      padding: 0.1em 0.35em;
+      padding: 0.1em 0.4em;
       border: 1px solid var(--rule);
     }
-    table { width: 100%; border-collapse: collapse; margin: 1.5rem 0; }
-    th, td { text-align: left; padding: 0.6rem 0.85rem; border: 1px solid var(--rule); }
-    th { background: var(--panel); font-weight: 400; font-family: Georgia, serif; }
-    .status { color: var(--ink-muted); font-size: 0.9em; }
+    .endpoint { color: var(--ink); border-bottom: 1px dashed var(--rule); }
+    .endpoint:hover { border-bottom-style: solid; }
+    table { width: 100%; border-collapse: collapse; margin: 1.5rem 0; background: var(--bg); }
+    th, td { text-align: left; padding: 0.7rem 0.95rem; border-top: 1px solid var(--rule-soft); border-bottom: 1px solid var(--rule-soft); vertical-align: middle; }
+    thead th { background: var(--panel); font-family: Georgia, serif; font-weight: 400; font-size: 0.78rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-2); border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+    td.desc { color: var(--ink-2); font-size: 0.92em; }
+    td.meta { font-size: 0.82em; color: var(--ink-mut); white-space: nowrap; }
+    td.meta .age { color: var(--ink-mut); font-size: 0.85em; }
+    .dot {
+      display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%;
+      vertical-align: middle; margin-right: 0.55rem; flex: 0 0 auto;
+      box-shadow: 0 0 0 1px color-mix(in oklch, currentColor 30%, transparent);
+    }
+    .dot--up      { background: var(--up); }
+    .dot--down    { background: var(--down); }
+    .dot--unknown { background: var(--unknown); }
+    .legend { font-size: 0.85em; color: var(--ink-mut); margin: 0.5rem 0 0; }
+    .legend .dot { box-shadow: none; }
     a { color: var(--ink); }
+    section { margin-top: 2.5rem; }
+    section h2 {
+      font-family: Georgia, serif; font-weight: 400; font-size: 1.05rem;
+      letter-spacing: 0.18em; text-transform: uppercase;
+      color: var(--ink); padding-top: 1.5rem; border-top: 1px solid var(--rule-soft); margin-bottom: 0.6rem;
+    }
+    .meta-row { color: var(--ink-mut); font-size: 0.9em; }
+    .meta-row a { color: var(--ink); }
+    .footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--rule-soft); color: var(--ink-mut); font-size: 0.85em; }
+    pre {
+      background: var(--panel); padding: 0.85rem 1rem;
+      border: 1px solid var(--rule);
+      overflow-x: auto; font-size: 0.82em;
+      margin: 0.5rem 0 0;
+    }
+    @media (max-width: 640px) {
+      td.desc { display: none; }
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>freeside mcp federation</h1>
-    <p class="lead">one gateway, many tenants. each path slug is an MCP service routed through ${escapeHtml(GATEWAY_ORIGIN)}.</p>
+    <p class="lead">one gateway, many tenants. each path slug is an MCP service routed through <code>${escapeHtml(GATEWAY_ORIGIN)}</code>. status auto-refreshes every 30s.</p>
 
     <table>
       <thead>
-        <tr><th>slug</th><th>name</th><th>description</th><th>endpoint</th><th>status</th></tr>
+        <tr>
+          <th style="width:9rem">tenant</th>
+          <th style="width:9rem">name</th>
+          <th>description</th>
+          <th style="width:11rem">endpoint</th>
+          <th style="width:7rem">latency</th>
+        </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
+    <p class="legend">
+      <span class="dot dot--up"></span> up
+      &nbsp;&nbsp;
+      <span class="dot dot--down"></span> down
+      &nbsp;&nbsp;
+      <span class="dot dot--unknown"></span> probing
+    </p>
 
-    <p class="status">machine-readable manifest at <a href="/.well-known/federation.json"><code>/.well-known/federation.json</code></a> · health at <a href="/healthz"><code>/healthz</code></a></p>
-    <p class="status">building something MCP-shaped on Mibera and want to wire in? <a href="https://github.com/0xHoneyJar/freeside-mcp-gateway/issues/new">open an issue</a>.</p>
+    <section>
+      <h2>connect</h2>
+      <p class="meta-row">install snippets per agent at <a href="https://docs-iota-cyan.vercel.app/install"><code>docs-iota-cyan.vercel.app/install</code></a>. the gateway is a streamable-http MCP — <code>POST /{tenant}/mcp</code> for JSON-RPC, <code>GET /{tenant}/mcp</code> for server events.</p>
+    </section>
+
+    <section>
+      <h2>endpoints</h2>
+      <pre><a href="/.well-known/federation.json">GET /.well-known/federation.json</a>   tenant manifest
+<a href="/status.json">GET /status.json</a>                       live tenant health
+<a href="/healthz">GET /healthz</a>                           gateway liveness
+GET /{tenant}/.well-known/mcp.json     tenant discovery card (rewritten)
+*   /{tenant}/mcp                      MCP transport (streamable-http)</pre>
+    </section>
+
+    <div class="footer">
+      <p>building something mibera-shaped and want a tenant slot? <a href="https://github.com/0xHoneyJar/freeside-mcp-gateway/issues/new">open an issue</a>. tool-first; agents come along for the ride.</p>
+    </div>
   </div>
 </body>
 </html>`;
