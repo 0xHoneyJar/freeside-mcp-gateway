@@ -429,7 +429,7 @@ function renderIndex(): string {
 
     <section>
       <h2>connect</h2>
-      <p class="meta-row">install snippets per agent at <a href="https://docs-iota-cyan.vercel.app/install"><code>docs-iota-cyan.vercel.app/install</code></a>. the gateway is a streamable-http MCP — <code>POST /{tenant}/mcp</code> for JSON-RPC, <code>GET /{tenant}/mcp</code> for server events.</p>
+      <p class="meta-row">install snippets per agent at <a href="https://codex.0xhoneyjar.xyz/install"><code>docs-iota-cyan.vercel.app/install</code></a>. the gateway is a streamable-http MCP — <code>POST /{tenant}/mcp</code> for JSON-RPC, <code>GET /{tenant}/mcp</code> for server events.</p>
     </section>
 
     <section>

@@ -42,7 +42,7 @@ export const TENANTS: Tenant[] = [
     publisher: "0xHoneyJar",
     upstream: "https://codex-mcp-production.up.railway.app",
     auth: "none",
-    documentation: "https://docs-iota-cyan.vercel.app",
+    documentation: "https://codex.0xhoneyjar.xyz",
     status: "live",
   },
 ];
