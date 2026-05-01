@@ -20,7 +20,8 @@
  */
 
 import { Hono } from "hono";
-import { TENANTS, findTenant, type Tenant } from "./tenants.js";
+import { JSONSchema, Schema } from "effect";
+import { TENANTS, TenantSchema, TenantsSchema, findTenant, type Tenant } from "./tenants.js";
 
 const app = new Hono();
 
@@ -86,26 +87,39 @@ function snapshotFor(slug: string): HealthSnapshot {
   return HEALTH_CACHE.get(slug) ?? { status: "unknown", checkedAt: 0 };
 }
 
-/** Federation manifest schema (custom v0.1 — propose extension when partners adopt). */
-type FederationManifest = {
-  schemaVersion: "0.1";
-  name: string;
-  title: string;
-  description: string;
-  publisher: string;
-  origin: string;
-  tenants: {
-    slug: string;
-    name: string;
-    description: string;
-    publisher: string;
-    endpoint: string;
-    discovery: string;
-    documentation?: string;
-    auth: string;
-    status: string;
-  }[];
-};
+/**
+ * Federation manifest schema (custom v0.1 — propose extension when partners adopt).
+ * Defined as Effect.Schema so we get:
+ *   - static TS type via Schema.Schema.Type<typeof FederationManifestSchema>
+ *   - JSON Schema export at /schema/federation.json
+ *   - runtime validation if we ever read manifests from external sources
+ */
+const FederationTenantViewSchema = Schema.Struct({
+  slug: Schema.String,
+  name: Schema.String,
+  description: Schema.String,
+  publisher: Schema.String,
+  endpoint: Schema.String,
+  discovery: Schema.String,
+  documentation: Schema.optional(Schema.String),
+  auth: Schema.String,
+  status: Schema.String,
+});
+
+const FederationManifestSchema = Schema.Struct({
+  schemaVersion: Schema.Literal("0.1"),
+  name: Schema.String,
+  title: Schema.String,
+  description: Schema.String,
+  publisher: Schema.String,
+  origin: Schema.String,
+  tenants: Schema.Array(FederationTenantViewSchema),
+}).annotations({
+  identifier: "FederationManifest",
+  description: "Top-level manifest published at /.well-known/federation.json",
+});
+
+type FederationManifest = Schema.Schema.Type<typeof FederationManifestSchema>;
 
 function buildManifest(): FederationManifest {
   return {
@@ -135,6 +149,15 @@ function buildManifest(): FederationManifest {
 app.get("/healthz", (c) => c.text("ok"));
 
 app.get("/.well-known/federation.json", (c) => c.json(buildManifest()));
+
+// ────── Schema export endpoints ──────
+// JSONSchema.make derives a JSON-Schema document from an Effect.Schema —
+// partner authors / registry tooling use these to validate their own
+// tenant submissions or federation manifests. Free, no extra step.
+
+app.get("/schema/tenant.json", (c) => c.json(JSONSchema.make(TenantSchema)));
+app.get("/schema/tenants.json", (c) => c.json(JSONSchema.make(TenantsSchema)));
+app.get("/schema/federation.json", (c) => c.json(JSONSchema.make(FederationManifestSchema)));
 
 app.get("/status.json", (c) =>
   c.json({
