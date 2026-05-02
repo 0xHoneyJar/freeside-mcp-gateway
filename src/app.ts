@@ -22,6 +22,7 @@
 import { Hono } from "hono";
 import { JSONSchema, Schema } from "effect";
 import { TENANTS, TenantSchema, TenantsSchema, findTenant, type Tenant } from "./tenants.js";
+import { checkAccess, isAuthorizedOperator } from "./auth.js";
 
 const app = new Hono();
 
@@ -94,6 +95,17 @@ function snapshotFor(slug: string): HealthSnapshot {
  *   - JSON Schema export at /schema/federation.json
  *   - runtime validation if we ever read manifests from external sources
  */
+const FederationPricingViewSchema = Schema.Struct({
+  model: Schema.String,
+  unitUsd: Schema.optional(Schema.Number),
+  description: Schema.String,
+});
+
+const FederationOwnerViewSchema = Schema.Struct({
+  handle: Schema.String,
+  contact: Schema.String,
+});
+
 const FederationTenantViewSchema = Schema.Struct({
   slug: Schema.String,
   name: Schema.String,
@@ -103,7 +115,15 @@ const FederationTenantViewSchema = Schema.Struct({
   discovery: Schema.String,
   documentation: Schema.optional(Schema.String),
   auth: Schema.String,
+  // Wire-level header the upstream expects (registry declaration — caller composes from it).
+  authHeader: Schema.optional(Schema.String),
   status: Schema.String,
+  // v0.2 — flattened denormalized view; strict source-of-truth lives in /schema/tenant.json
+  visibility: Schema.String,
+  access: Schema.String,
+  capabilities: Schema.Array(Schema.String),
+  pricing: Schema.optional(FederationPricingViewSchema),
+  owner: Schema.optional(FederationOwnerViewSchema),
 });
 
 const FederationManifestSchema = Schema.Struct({
@@ -120,8 +140,29 @@ const FederationManifestSchema = Schema.Struct({
 });
 
 type FederationManifest = Schema.Schema.Type<typeof FederationManifestSchema>;
+type FederationTenantView = Schema.Schema.Type<typeof FederationTenantViewSchema>;
 
-function buildManifest(): FederationManifest {
+function toTenantView(t: Tenant): FederationTenantView {
+  return {
+    slug: t.slug,
+    name: t.name,
+    description: t.description,
+    publisher: t.publisher,
+    endpoint: `/${t.slug}/mcp`,
+    discovery: `/${t.slug}/.well-known/mcp.json`,
+    documentation: t.documentation,
+    auth: t.auth,
+    authHeader: t.authHeader,
+    status: t.status,
+    visibility: t.visibility,
+    access: t.access,
+    capabilities: t.capabilities,
+    pricing: t.pricing,
+    owner: t.owner,
+  };
+}
+
+function manifestForTenants(tenants: ReadonlyArray<Tenant>): FederationManifest {
   return {
     schemaVersion: "0.1",
     name: "freeside-mcp",
@@ -130,17 +171,7 @@ function buildManifest(): FederationManifest {
       "Federated gateway hosting multiple substrate-truth MCPs under one domain. Path-based routing — /{tenant}/mcp endpoints proxy to upstream services.",
     publisher: "0xHoneyJar",
     origin: GATEWAY_ORIGIN,
-    tenants: TENANTS.map((t) => ({
-      slug: t.slug,
-      name: t.name,
-      description: t.description,
-      publisher: t.publisher,
-      endpoint: `/${t.slug}/mcp`,
-      discovery: `/${t.slug}/.well-known/mcp.json`,
-      documentation: t.documentation,
-      auth: t.auth,
-      status: t.status,
-    })),
+    tenants: tenants.map(toTenantView),
   };
 }
 
@@ -148,7 +179,26 @@ function buildManifest(): FederationManifest {
 
 app.get("/healthz", (c) => c.text("ok"));
 
-app.get("/.well-known/federation.json", (c) => c.json(buildManifest()));
+// Public manifest — only `visibility: public` tenants. This is the
+// auth-free discovery surface. Partner registries and external clients
+// poll this; nothing here is secret.
+app.get("/.well-known/federation.json", (c) => {
+  const visible = TENANTS.filter((t) => t.visibility === "public");
+  return c.json(manifestForTenants(visible));
+});
+
+// Internal manifest — `public` + `internal`, but never `unlisted`.
+// Operator-gated via `Authorization: Bearer ${OPERATOR_API_KEY}`. Used
+// by the operator harness, freeside-characters, and other known callers
+// that legitimately need to enumerate internal tenants. Never advertised
+// publicly.
+app.get("/internal/federation.json", (c) => {
+  if (!isAuthorizedOperator(c)) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  const visible = TENANTS.filter((t) => t.visibility !== "unlisted");
+  return c.json(manifestForTenants(visible));
+});
 
 // ────── Schema export endpoints ──────
 // JSONSchema.make derives a JSON-Schema document from an Effect.Schema —
@@ -263,6 +313,15 @@ app.all("/:slug/*", async (c) => {
       { error: "tenant_paused", slug, message: "Tenant is temporarily unavailable." },
       503,
     );
+  }
+
+  // v0.2 access gate — runs BEFORE forward. Tenants with `access: open`
+  // (e.g. codex) pass through unchanged; `api-key`/`allowlist` require a
+  // matching per-tenant bearer; `x402` returns 402 until Phase 6 wires
+  // payment-proof verification.
+  const gate = checkAccess(c, tenant);
+  if (!gate.allowed) {
+    return c.json({ error: gate.reason, slug }, gate.status);
   }
 
   const gatewayUrl = new URL(c.req.url);
