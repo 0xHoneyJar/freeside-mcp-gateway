@@ -58,7 +58,7 @@ const SourceOfTruth = Schema.Struct({
   url: Schema.optional(Schema.String),
 });
 
-const McpBlock = Schema.Struct({
+const McpBlockBase = Schema.Struct({
   shape: McpShape.annotations({
     description:
       "data = lookup-shaped · tool = action-shaped · proxy = forwarder",
@@ -100,6 +100,19 @@ const McpBlock = Schema.Struct({
     description: "Soft-deprecated v1 alias · prefer docs.url (Cycle D extension)",
   }),
 });
+
+// Conditional refine: when paths includes remote-http, mcp.remote MUST be set.
+// Mirrors the Auth filter pattern (auth.ts §80-92). Without this, a beacon
+// declaring remote-http transport but omitting the remote block would pass
+// schema validation and only fail at gateway boot with a less-clear error.
+const McpBlock = McpBlockBase.pipe(
+  Schema.filter((mcp) => {
+    if (mcp.paths.includes("remote-http") && mcp.remote === undefined) {
+      return "mcp.remote required when paths includes remote-http";
+    }
+    return true;
+  }),
+);
 
 const CliBlock = Schema.optional(
   Schema.Struct({

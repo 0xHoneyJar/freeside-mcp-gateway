@@ -22,19 +22,21 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && chmod +x dist/bin/build-beacon-json.js",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "test": "tsx --test tests/*.test.ts"
+    "test:unit": "tsx --test tests/schema.test.ts",
+    "test:cli": "pnpm build && tsx --test tests/cli.test.ts",
+    "test": "pnpm build && tsx --test tests/*.test.ts"
   },
   "peerDependencies": {
-    "effect": "^3.10.0"
+    "effect": "^3.21.0"
   },
   "dependencies": {
     "yaml": "^2.6.0"
   },
   "devDependencies": {
-    "effect": "^3.10.0",
+    "effect": "^3.21.0",
     "tsx": "^4.20.0",
     "typescript": "^5.4.0",
     "@types/node": "^22.0.0"

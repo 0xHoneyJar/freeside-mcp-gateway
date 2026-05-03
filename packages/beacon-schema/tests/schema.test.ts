@@ -167,6 +167,33 @@ test("BeaconV2JsonSchema exports a non-empty JSON Schema object", () => {
   assert.ok(dump.includes("BeaconV2"), "expected BeaconV2 identifier in schema");
 });
 
+// ─── McpBlock refine: remote required when paths includes remote-http ────
+
+test("mcp refine · paths includes remote-http but remote omitted → fail", () => {
+  const beacon = structuredClone(fix("codex-v2.yaml")) as Record<string, unknown>;
+  const mcp = beacon.mcp as Record<string, unknown>;
+  mcp.paths = ["remote-http"];
+  delete mcp.remote;
+  const result = Effect.runSyncExit(decodeBeacon(beacon));
+  assert.equal(result._tag, "Failure");
+  if (result._tag === "Failure") {
+    const message = JSON.stringify(result.cause);
+    assert.ok(
+      message.includes("mcp.remote required when paths includes remote-http"),
+      `unexpected error: ${message}`,
+    );
+  }
+});
+
+test("mcp refine · paths is stdio-only and remote omitted → success", () => {
+  const beacon = structuredClone(fix("codex-v2.yaml")) as Record<string, unknown>;
+  const mcp = beacon.mcp as Record<string, unknown>;
+  mcp.paths = ["stdio"];
+  delete mcp.remote;
+  const result = Effect.runSyncExit(decodeBeacon(beacon));
+  assert.equal(result._tag, "Success");
+});
+
 // ─── docs placeholder (Cycle D contract) ──────────────────────────────────
 
 test("docs:Schema.optional(Schema.Unknown) accepts arbitrary docs payload (Cycle D placeholder)", () => {
