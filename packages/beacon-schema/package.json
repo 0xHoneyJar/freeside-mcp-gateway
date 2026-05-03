@@ -26,8 +26,8 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
     "test:unit": "tsx --test tests/schema.test.ts",
-    "test:cli": "pnpm build && tsx --test tests/cli.test.ts",
-    "test": "pnpm build && tsx --test tests/*.test.ts"
+    "test:cli": "tsx --test tests/cli.test.ts",
+    "test": "pnpm build && pnpm test:unit && pnpm test:cli"
   },
   "peerDependencies": {
     "effect": "^3.21.0"
