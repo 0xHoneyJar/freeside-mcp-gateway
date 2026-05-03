@@ -1,26 +1,47 @@
 lockfileVersion: '6.0'
 
-dependencies:
-  '@hono/node-server':
-    specifier: ^1.14.1
-    version: 1.14.1(hono@4.7.0)
-  effect:
-    specifier: ^3.21.2
-    version: 3.21.2
-  hono:
-    specifier: ^4.7.0
-    version: 4.7.0
+importers:
 
-devDependencies:
-  '@types/node':
-    specifier: ^22.0.0
-    version: 22.0.0
-  tsx:
-    specifier: ^4.20.0
-    version: 4.20.0
-  typescript:
-    specifier: ^5.7.0
-    version: 5.7.2
+  .:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.14.1
+        version: 1.14.1(hono@4.7.0)
+      effect:
+        specifier: ^3.21.2
+        version: 3.21.2
+      hono:
+        specifier: ^4.7.0
+        version: 4.7.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.0.0
+      tsx:
+        specifier: ^4.20.0
+        version: 4.20.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.7.2
+
+  packages/beacon-schema:
+    dependencies:
+      yaml:
+        specifier: ^2.6.0
+        version: 2.6.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.0.0
+      effect:
+        specifier: ^3.21.0
+        version: 3.21.2
+      tsx:
+        specifier: ^4.20.0
+        version: 4.20.0
+      typescript:
+        specifier: ^5.4.0
+        version: 5.7.2
 
 packages:
 
@@ -269,7 +290,6 @@ packages:
 
   /@standard-schema/spec@1.1.0:
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
-    dev: false
 
   /@types/node@22.0.0:
     resolution: {integrity: sha512-VT7KSYudcPOzP5Q0wfbowyNLaVR8QWUdw+088uFWwfvpY6uCWaXpqV6ieLAu9WBcnTa7H4Z5RLK8I5t2FuOcqw==}
@@ -282,7 +302,6 @@ packages:
     dependencies:
       '@standard-schema/spec': 1.1.0
       fast-check: 3.23.2
-    dev: false
 
   /esbuild@0.25.12:
     resolution: {integrity: sha512-bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==}
@@ -323,7 +342,6 @@ packages:
     engines: {node: '>=8.0.0'}
     dependencies:
       pure-rand: 6.1.0
-    dev: false
 
   /fsevents@2.3.3:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
@@ -346,7 +364,6 @@ packages:
 
   /pure-rand@6.1.0:
     resolution: {integrity: sha512-bVWawvoZoBYpp6yIoQtQXHZjmz35RSVHnUOTefl8Vcjr8snTPY1wnpSPMWekcFwbxI6gtmT7rSYPFvz71ldiOA==}
-    dev: false
 
   /resolve-pkg-maps@1.0.0:
     resolution: {integrity: sha512-seS2Tj26TBVOC2NIc2rOe2y2ZO7efxITtLZcGSOnHHNOQ7CkiUBfw0Iw2ck6xkIhPwLhKNLS8BO+hEpngQlqzw==}
@@ -372,3 +389,9 @@ packages:
   /undici-types@6.11.1:
     resolution: {integrity: sha512-mIDEX2ek50x0OlRgxryxsenE5XaQD4on5U2inY7RApK3SOJpofyw7uW2AyfMKkhAxXIceo2DeWGVGwyvng1GNQ==}
     dev: true
+
+  /yaml@2.6.0:
+    resolution: {integrity: sha512-a6ae//JvKDEra2kdi1qzCyrJW/WZCgFi8ydDV+eXExl95t+5R+ijnqHJbz9tmMh8FUjx3iv2fCQ4dclAQlO2UQ==}
+    engines: {node: '>= 14'}
+    hasBin: true
+    dev: false
