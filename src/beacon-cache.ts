@@ -194,7 +194,15 @@ export function startBeaconRefresh(): () => void {
     return stopBeaconRefresh;
   }
   REFRESH_INTERVAL = setInterval(() => {
-    void refreshAllBeacons();
+    // Hotfix 2026-05-04: explicit .catch() · `void` doesn't catch unhandled
+    // rejections · Node default crashes the process. Same fix shape as
+    // app.ts boot wiring.
+    refreshAllBeacons().catch((err: unknown) => {
+      console.warn(
+        "[beacon-cache] scheduled refreshAllBeacons failed:",
+        err,
+      );
+    });
   }, BEACON_TTL_MS);
   // Don't keep the event loop alive solely for this timer — Node tests
   // and short-lived smokes shouldn't hang waiting for the interval.

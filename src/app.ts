@@ -94,7 +94,20 @@ setInterval(() => {
 // after which beacon-resolver.ts overlays beacon B-axis fields. setInterval
 // drives the recurring 5min refresh per SDD §1.3. Both calls are no-ops if
 // tests stop them via stopBeaconRefresh.
-void refreshAllBeacons();
+//
+// Hotfix 2026-05-04: explicit .catch() instead of `void` prefix. `void` only
+// suppresses the TS warning · Node still crashes on unhandled rejection
+// (default since Node 15 with --unhandled-rejections=throw). Boot-time
+// refresh fires before any caller has a stale cache to fall back to · if it
+// rejects, the process exits and Railway marks the deploy FAILED. Catching
+// here keeps boot truly non-blocking and lets the gateway serve curator
+// fallback while individual fetches retry on the 5min schedule.
+refreshAllBeacons().catch((err: unknown) => {
+  console.warn(
+    "[boot] refreshAllBeacons failed (gateway continues with curator fallback):",
+    err,
+  );
+});
 startBeaconRefresh();
 
 function snapshotFor(slug: string): HealthSnapshot {
