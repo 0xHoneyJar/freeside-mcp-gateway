@@ -228,18 +228,28 @@ app.get("/schema/federation.json", (c) => c.json(JSONSchema.make(FederationManif
 // the gateway actually decodes at refresh time.
 app.get("/.well-known/beacon-schema/v2.json", (c) => c.json(BeaconV2JsonSchema));
 
-app.get("/status.json", (c) =>
-  c.json({
+app.get("/status.json", (c) => {
+  // Bridgebuilder PR#4 finding `status-credentialkey-leaks-publicly` (MED ·
+  // security): credentialKey + credentialPresent are operationally sensitive
+  // reconnaissance signals (env-var naming + which tenants have unset secrets).
+  // Gate them behind operator auth WITHOUT changing the response shape — keys
+  // remain present but null for unauthenticated callers so smoke-prod.ts and
+  // existing v0.2 consumers continue to parse the document unchanged.
+  const operatorAuthorized = isAuthorizedOperator(c);
+  return c.json({
     gateway: { status: "up", origin: GATEWAY_ORIGIN, checkedAt: new Date().toISOString() },
     tenants: TENANTS.map((t) => {
       const resolved = resolveTenant(t);
       // Beacon freshness — informational only · existing fields preserved
       // for v0.2 consumers. credentialPresent is a boolean (never echoes
       // the secret value); credentialKey is the env-var NAME for operator
-      // diagnostics ("did I set the right Railway secret?").
-      const credentialKey = resolved.credentialsRef?.key ?? null;
-      const credentialPresent = credentialKey
-        ? Boolean(process.env[credentialKey])
+      // diagnostics ("did I set the right Railway secret?"). Both are
+      // operator-gated per bridgebuilder finding above.
+      const credentialKey = operatorAuthorized
+        ? (resolved.credentialsRef?.key ?? null)
+        : null;
+      const credentialPresent = operatorAuthorized && resolved.credentialsRef?.key
+        ? Boolean(process.env[resolved.credentialsRef.key])
         : null;
       return {
         slug: t.slug,
@@ -258,8 +268,8 @@ app.get("/status.json", (c) =>
         },
       };
     }),
-  }),
-);
+  });
+});
 
 app.get("/", (c) => c.html(renderIndex()));
 
@@ -366,11 +376,33 @@ app.all("/:slug/*", async (c) => {
   // forwards in this hop. `resolved` carries the same A-axis as `tenant`
   // (slug/upstream/visibility/access/status) plus any beacon-derived auth
   // declaration. Credential resolution fails CLOSED — a misconfigured
-  // tenant returns 401 instead of forwarding without auth (PRD §7.2).
+  // tenant returns 502 (gateway lacks creds to forward upstream) instead
+  // of forwarding without auth (PRD §7.2).
+  //
+  // Bridgebuilder PR#4 findings:
+  //   - `app-credential-failure-returns-401` (MED · api-design): semantically
+  //     401 means CALLER failed auth, but here the GATEWAY lacks creds. 502
+  //     Bad Gateway accurately reflects "downstream/upstream wiring broken".
+  //   - `credentials-resolver-reason-leaks-in-response` (LOW · security):
+  //     verbose reason (env var names, internal slug/structure) leaks to
+  //     anonymous callers. Move the diagnostic to logs; callers get a
+  //     stable structured error code.
   const resolved = resolveTenant(tenant);
   const cred = resolveUpstreamCredential(resolved);
   if (!cred.resolved) {
-    return c.json({ error: cred.reason, slug }, 401);
+    console.warn(
+      "[gateway] credential resolution failed for tenant=%s: %s",
+      slug,
+      cred.reason,
+    );
+    return c.json(
+      {
+        error: "upstream credential unavailable",
+        code: "tenant_misconfigured",
+        slug,
+      },
+      502,
+    );
   }
 
   const gatewayUrl = new URL(c.req.url);
