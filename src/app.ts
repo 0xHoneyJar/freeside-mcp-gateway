@@ -21,8 +21,12 @@
 
 import { Hono } from "hono";
 import { JSONSchema, Schema } from "effect";
+import { BeaconV2JsonSchema } from "@0xhoneyjar/beacon-schema";
 import { TENANTS, TenantSchema, TenantsSchema, findTenant, type Tenant } from "./tenants.js";
 import { checkAccess, isAuthorizedOperator } from "./auth.js";
+import { refreshAllBeacons, startBeaconRefresh } from "./beacon-cache.js";
+import { resolveTenant } from "./beacon-resolver.js";
+import { resolveUpstreamCredential } from "./credentials-resolver.js";
 
 const app = new Hono();
 
@@ -83,6 +87,15 @@ void probeAll();
 setInterval(() => {
   void probeAll();
 }, PROBE_INTERVAL_MS);
+
+// ────── beacon broadcast refresh (Cycle C v0.3 P3) ──────
+// Non-blocking boot — gateway accepts requests immediately using tenants.ts
+// curator fallback. First refresh completes in ~10s for the 2-tenant fleet,
+// after which beacon-resolver.ts overlays beacon B-axis fields. setInterval
+// drives the recurring 5min refresh per SDD §1.3. Both calls are no-ops if
+// tests stop them via stopBeaconRefresh.
+void refreshAllBeacons();
+startBeaconRefresh();
 
 function snapshotFor(slug: string): HealthSnapshot {
   return HEALTH_CACHE.get(slug) ?? { status: "unknown", checkedAt: 0 };
@@ -209,20 +222,54 @@ app.get("/schema/tenant.json", (c) => c.json(JSONSchema.make(TenantSchema)));
 app.get("/schema/tenants.json", (c) => c.json(JSONSchema.make(TenantsSchema)));
 app.get("/schema/federation.json", (c) => c.json(JSONSchema.make(FederationManifestSchema)));
 
-app.get("/status.json", (c) =>
-  c.json({
+// Beacon v2 schema export (Cycle C v0.3 P3) — partner authors / construct
+// build steps validate their beacon.yaml against this. Sourced from the
+// @0xhoneyjar/beacon-schema package so this stays in lockstep with what
+// the gateway actually decodes at refresh time.
+app.get("/.well-known/beacon-schema/v2.json", (c) => c.json(BeaconV2JsonSchema));
+
+app.get("/status.json", (c) => {
+  // Bridgebuilder PR#4 finding `status-credentialkey-leaks-publicly` (MED ·
+  // security): credentialKey + credentialPresent are operationally sensitive
+  // reconnaissance signals (env-var naming + which tenants have unset secrets).
+  // Gate them behind operator auth WITHOUT changing the response shape — keys
+  // remain present but null for unauthenticated callers so smoke-prod.ts and
+  // existing v0.2 consumers continue to parse the document unchanged.
+  const operatorAuthorized = isAuthorizedOperator(c);
+  return c.json({
     gateway: { status: "up", origin: GATEWAY_ORIGIN, checkedAt: new Date().toISOString() },
-    tenants: TENANTS.map((t) => ({
-      slug: t.slug,
-      name: t.name,
-      ...snapshotFor(t.slug),
-      checkedAtIso: HEALTH_CACHE.get(t.slug)?.checkedAt
-        ? new Date(HEALTH_CACHE.get(t.slug)!.checkedAt).toISOString()
-        : null,
-      upstream: t.upstream,
-    })),
-  }),
-);
+    tenants: TENANTS.map((t) => {
+      const resolved = resolveTenant(t);
+      // Beacon freshness — informational only · existing fields preserved
+      // for v0.2 consumers. credentialPresent is a boolean (never echoes
+      // the secret value); credentialKey is the env-var NAME for operator
+      // diagnostics ("did I set the right Railway secret?"). Both are
+      // operator-gated per bridgebuilder finding above.
+      const credentialKey = operatorAuthorized
+        ? (resolved.credentialsRef?.key ?? null)
+        : null;
+      const credentialPresent = operatorAuthorized && resolved.credentialsRef?.key
+        ? Boolean(process.env[resolved.credentialsRef.key])
+        : null;
+      return {
+        slug: t.slug,
+        name: resolved.name,
+        ...snapshotFor(t.slug),
+        checkedAtIso: HEALTH_CACHE.get(t.slug)?.checkedAt
+          ? new Date(HEALTH_CACHE.get(t.slug)!.checkedAt).toISOString()
+          : null,
+        upstream: t.upstream,
+        beacon: {
+          source: resolved.beaconSource,
+          ageSec: resolved.beaconAgeSec,
+          authKind: resolved.authKind,
+          credentialKey,
+          credentialPresent,
+        },
+      };
+    }),
+  });
+});
 
 app.get("/", (c) => c.html(renderIndex()));
 
@@ -324,6 +371,40 @@ app.all("/:slug/*", async (c) => {
     return c.json({ error: gate.reason, slug }, gate.status);
   }
 
+  // v0.3 broadcast layer (Cycle C P3) — overlay beacon B-axis fields on top
+  // of the curator tenant, then resolve the upstream credential the gateway
+  // forwards in this hop. `resolved` carries the same A-axis as `tenant`
+  // (slug/upstream/visibility/access/status) plus any beacon-derived auth
+  // declaration. Credential resolution fails CLOSED — a misconfigured
+  // tenant returns 502 (gateway lacks creds to forward upstream) instead
+  // of forwarding without auth (PRD §7.2).
+  //
+  // Bridgebuilder PR#4 findings:
+  //   - `app-credential-failure-returns-401` (MED · api-design): semantically
+  //     401 means CALLER failed auth, but here the GATEWAY lacks creds. 502
+  //     Bad Gateway accurately reflects "downstream/upstream wiring broken".
+  //   - `credentials-resolver-reason-leaks-in-response` (LOW · security):
+  //     verbose reason (env var names, internal slug/structure) leaks to
+  //     anonymous callers. Move the diagnostic to logs; callers get a
+  //     stable structured error code.
+  const resolved = resolveTenant(tenant);
+  const cred = resolveUpstreamCredential(resolved);
+  if (!cred.resolved) {
+    console.warn(
+      "[gateway] credential resolution failed for tenant=%s: %s",
+      slug,
+      cred.reason,
+    );
+    return c.json(
+      {
+        error: "upstream credential unavailable",
+        code: "tenant_misconfigured",
+        slug,
+      },
+      502,
+    );
+  }
+
   const gatewayUrl = new URL(c.req.url);
   const upstreamUrl = buildUpstreamUrl(tenant, gatewayUrl);
   const isDiscovery = gatewayUrl.pathname.endsWith("/.well-known/mcp.json");
@@ -332,6 +413,15 @@ app.all("/:slug/*", async (c) => {
   // Identify the proxy hop for upstream observability + debugging.
   headers.set("x-forwarded-by", `freeside-mcp-gateway/${slug}`);
   headers.set("x-forwarded-host", gatewayUrl.host);
+
+  // v0.3 — inject the resolved upstream credential when the upstream
+  // declares auth (codex/auth:none short-circuits to empty header → no-op).
+  // The header value is NEVER logged. Setting after pruneRequestHeaders
+  // ensures we overwrite any caller-supplied header with the same name
+  // (e.g. caller-side X-MCP-Key from a v0.2-era client that still sets it).
+  if (cred.header) {
+    headers.set(cred.header, cred.value);
+  }
 
   const init: RequestInit & { duplex?: "half" } = {
     method: c.req.method,
